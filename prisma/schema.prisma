@@ -1,0 +1,355 @@
+// TURFZONE Prisma Database Schema
+// Database Entities: Users, Roles, Sports, Grounds, Ground-Sport relationships,
+// Pricing Rules, Operating Hours, Blocked Periods, Bookings, Booking Line Items,
+// Payments, Refunds, Discounts, Audit Logs.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  CUSTOMER
+  ADMIN
+  STAFF
+}
+
+enum BookingStatus {
+  PENDING
+  CONFIRMED
+  CANCELLED
+  COMPLETED
+}
+
+enum PaymentStatus {
+  PENDING
+  ADVANCE_PAID
+  PAID_FULL
+  REFUNDED
+}
+
+enum PaymentMethod {
+  RAZORPAY
+  VENUE_CASH
+  VENUE_CARD
+}
+
+enum PaymentType {
+  FULL
+  ADVANCE
+  REMAINING
+}
+
+enum LineItemType {
+  GROUND_CHARGE
+  PEAK_SURCHARGE
+  EQUIPMENT_ADDON
+  TAX
+  DISCOUNT
+}
+
+// -------------------------------------------------------------
+// USER & AUTHENTICATION
+// -------------------------------------------------------------
+model User {
+  id            String         @id @default(uuid())
+  email         String         @unique
+  phone         String         @unique
+  name          String
+  passwordHash  String
+  role          Role           @default(CUSTOMER)
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  bookings      Booking[]      @relation("CustomerBookings")
+  blockedSlots  BlockedPeriod[] @relation("AdminBlockedSlots")
+  auditLogs     AuditLog[]
+
+  @@index([email])
+  @@index([phone])
+}
+
+// -------------------------------------------------------------
+// SPORTS
+// -------------------------------------------------------------
+model Sport {
+  id                  String         @id @default(uuid())
+  name                String         @unique
+  slug                String         @unique
+  description         String
+  coverImage          String
+  startingHourlyRate  Float
+  minDurationMinutes  Int            @default(60)
+  isActive            Boolean        @default(true)
+  createdAt           DateTime       @default(now())
+  updatedAt           DateTime       @updatedAt
+
+  grounds             GroundSport[]
+  pricingRules        PricingRule[]
+  bookings            Booking[]
+
+  @@index([isActive])
+}
+
+// -------------------------------------------------------------
+// GROUNDS & ARENAS
+// -------------------------------------------------------------
+model Ground {
+  id              String          @id @default(uuid())
+  name            String          @unique
+  slug            String          @unique
+  description     String
+  surfaceType     String
+  dimensions      String
+  lightingLux     Int             @default(1200)
+  capacity        Int             @default(20)
+  baseHourlyRate  Float
+  isActive        Boolean         @default(true)
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  sports          GroundSport[]
+  pricingRules    PricingRule[]
+  blockedPeriods  BlockedPeriod[]
+  bookings        Booking[]
+
+  @@index([isActive])
+}
+
+// -------------------------------------------------------------
+// GROUND-SPORT RELATIONSHIP (M:N)
+// -------------------------------------------------------------
+model GroundSport {
+  id        String   @id @default(uuid())
+  groundId  String
+  sportId   String
+  createdAt DateTime @default(now())
+
+  ground    Ground   @relation(fields: [groundId], references: [id], onDelete: Cascade)
+  sport     Sport    @relation(fields: [sportId], references: [id], onDelete: Cascade)
+
+  @@unique([groundId, sportId])
+  @@index([groundId])
+  @@index([sportId])
+}
+
+// -------------------------------------------------------------
+// PRICING RULES
+// -------------------------------------------------------------
+model PricingRule {
+  id              String    @id @default(uuid())
+  sportId         String?
+  groundId        String?
+  dayType         String    // "WEEKDAY", "WEEKEND", "ALL"
+  startHour       Int       // e.g. 16 for 4 PM
+  endHour         Int       // e.g. 24 for 12 AM
+  ratePerHour     Float
+  isPeak          Boolean   @default(false)
+  surchargeAmount Float     @default(0)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  sport           Sport?    @relation(fields: [sportId], references: [id], onDelete: Cascade)
+  ground          Ground?   @relation(fields: [groundId], references: [id], onDelete: Cascade)
+
+  @@index([sportId])
+  @@index([groundId])
+}
+
+// -------------------------------------------------------------
+// OPERATING HOURS
+// -------------------------------------------------------------
+model OperatingHours {
+  id          String   @id @default(uuid())
+  dayOfWeek   Int      // 0 = Sunday, 1 = Monday, ... 6 = Saturday
+  openTime    String   // e.g. "06:00"
+  closeTime   String   // e.g. "01:00"
+  isOpen      Boolean  @default(true)
+  updatedAt   DateTime @updatedAt
+
+  @@unique([dayOfWeek])
+}
+
+// -------------------------------------------------------------
+// BLOCKED PERIODS & MAINTENANCE WINDOWS
+// -------------------------------------------------------------
+model BlockedPeriod {
+  id                String    @id @default(uuid())
+  groundId          String
+  date              String    // YYYY-MM-DD
+  startTime         String    // e.g. "14:00" or "02:00 PM"
+  endTime           String    // e.g. "17:00" or "05:00 PM"
+  startMinuteOfDay  Int       // Minutes from midnight, e.g. 14*60 = 840
+  endMinuteOfDay    Int       // Minutes from midnight, e.g. 17*60 = 1020
+  reason            String
+  blockedByUserId   String?
+  createdAt         DateTime  @default(now())
+
+  ground            Ground    @relation(fields: [groundId], references: [id], onDelete: Cascade)
+  blockedByUser     User?     @relation("AdminBlockedSlots", fields: [blockedByUserId], references: [id])
+
+  @@index([groundId, date])
+}
+
+// -------------------------------------------------------------
+// BOOKINGS (Authoritative Double-Booking Protection Layer)
+// -------------------------------------------------------------
+model Booking {
+  id                String         @id @default(uuid())
+  referenceCode     String         @unique // e.g. "TZ-8492"
+  customerId        String
+  sportId           String
+  groundId          String
+  date              String         // YYYY-MM-DD
+  startTime         String         // e.g. "07:00 PM"
+  endTime           String         // e.g. "08:30 PM"
+  startMinuteOfDay  Int            // e.g. 19*60 = 1140
+  endMinuteOfDay    Int            // e.g. 20*60 + 30 = 1230
+  durationMinutes   Int
+  bookingStatus     BookingStatus  @default(CONFIRMED)
+  paymentStatus     PaymentStatus  @default(PENDING)
+  paymentMethod     PaymentMethod  @default(RAZORPAY)
+  paymentType       PaymentType    @default(FULL)
+
+  // Financial Breakdown
+  baseHourlyRate    Float
+  effectiveHourly   Float
+  groundCharge      Float
+  peakSurcharge     Float          @default(0)
+  addOnsTotal       Float          @default(0)
+  discountAmount    Float          @default(0)
+  subtotal          Float
+  taxAmount         Float
+  totalAmount       Float
+  advancePercentage Float          @default(100)
+  advanceAmount     Float
+  remainingBalance  Float          @default(0)
+
+  notes             String?
+  canCancelUntil    DateTime?
+  holdExpiresAt     DateTime?      // For temporary holding during online checkout
+
+  createdAt         DateTime       @default(now())
+  updatedAt         DateTime       @updatedAt
+
+  customer          User           @relation("CustomerBookings", fields: [customerId], references: [id])
+  sport             Sport          @relation(fields: [sportId], references: [id])
+  ground            Ground         @relation(fields: [groundId], references: [id])
+  lineItems         BookingLineItem[]
+  payments          Payment[]
+  refunds           Refund[]
+
+  // Indexes for high performance availability lookups and double-booking scans
+  @@index([groundId, date])
+  @@index([customerId])
+  @@index([bookingStatus])
+  @@index([referenceCode])
+}
+
+// -------------------------------------------------------------
+// BOOKING LINE ITEMS
+// -------------------------------------------------------------
+model BookingLineItem {
+  id          String        @id @default(uuid())
+  bookingId   String
+  itemType    LineItemType
+  description String
+  unitPrice   Float
+  quantity    Int           @default(1)
+  totalPrice  Float
+  createdAt   DateTime      @default(now())
+
+  booking     Booking       @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  @@index([bookingId])
+}
+
+// -------------------------------------------------------------
+// PAYMENTS & RAZORPAY VERIFICATION
+// -------------------------------------------------------------
+model Payment {
+  id              String        @id @default(uuid())
+  bookingId       String
+  amount          Float
+  currency        String        @default("INR")
+  method          PaymentMethod
+  paymentType     PaymentType   @default(FULL)
+  status          String        // "SUCCESS", "PENDING", "FAILED"
+
+  // Razorpay Gateway Identifiers
+  razorpayOrderId   String?     @unique
+  razorpayPaymentId String?     @unique
+  razorpaySignature String?
+  receiptNumber     String?
+
+  isVerified      Boolean       @default(false)
+  createdAt       DateTime      @default(now())
+  verifiedAt      DateTime?
+
+  booking         Booking       @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  refunds         Refund[]
+
+  @@index([bookingId])
+  @@index([razorpayOrderId])
+  @@index([razorpayPaymentId])
+}
+
+// -------------------------------------------------------------
+// REFUNDS
+// -------------------------------------------------------------
+model Refund {
+  id                  String    @id @default(uuid())
+  bookingId           String
+  paymentId           String?
+  amount              Float
+  reason              String
+  status              String    @default("PROCESSED") // "PROCESSED", "PENDING", "FAILED"
+  refundReferenceCode String?
+  createdAt           DateTime  @default(now())
+
+  booking             Booking   @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  payment             Payment?  @relation(fields: [paymentId], references: [id])
+
+  @@index([bookingId])
+  @@index([paymentId])
+}
+
+// -------------------------------------------------------------
+// DISCOUNTS & PROMOTIONAL COUPONS
+// -------------------------------------------------------------
+model Discount {
+  id            String    @id @default(uuid())
+  code          String    @unique // e.g. "TURFOPEN20"
+  description   String
+  discountType  String    // "PERCENTAGE" or "FIXED"
+  value         Float     // e.g. 20 for 20% or 200 for ₹200
+  validFrom     DateTime
+  validUntil    DateTime
+  isActive      Boolean   @default(true)
+  createdAt     DateTime  @default(now())
+
+  @@index([code, isActive])
+}
+
+// -------------------------------------------------------------
+// AUDIT LOGS
+// -------------------------------------------------------------
+model AuditLog {
+  id          String    @id @default(uuid())
+  userId      String?
+  action      String    // e.g. "CREATE_BOOKING", "CANCEL_BOOKING", "OFFLINE_PAYMENT", "BLOCK_SLOT"
+  entityType  String    // "Booking", "Payment", "Sport", "Ground"
+  entityId    String
+  details     String    // JSON string describing the change
+  ipAddress   String?
+  createdAt   DateTime  @default(now())
+
+  user        User?     @relation(fields: [userId], references: [id])
+
+  @@index([entityType, entityId])
+  @@index([action])
+}
