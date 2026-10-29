@@ -723,7 +723,7 @@ router4.get("/", (req, res) => {
       const endM = Math.min(1500, startM + stepMinutes);
       const startTimeStr = formatMinutesToTime(startM);
       const endTimeStr = formatMinutesToTime(endM);
-      const isPeak = startM >= 960 || endM > 960;
+      const isPeak = false;
       let status = "AVAILABLE";
       let bookingReference = void 0;
       let maintenanceReason = void 0;
@@ -759,8 +759,8 @@ router4.get("/", (req, res) => {
         startTime: startTimeStr,
         endTime: endTimeStr,
         status,
-        isPeak,
-        rate: isPeak ? 1150 : 900,
+        isPeak: false,
+        rate: 900,
         bookingReference,
         maintenanceReason
       });
@@ -800,9 +800,9 @@ function calculateAuthoritativePrice(input) {
   }
   const startMinute = parseTimeToMinutes(input.startTime);
   const endMinute = startMinute + input.durationMinutes;
-  const isPeak = startMinute >= 960 || endMinute > 960;
-  const peakHourlySurcharge = isPeak ? 250 : 0;
-  const peakSurchargeTotal = Math.round(peakHourlySurcharge * hours);
+  const isPeak = false;
+  const peakHourlySurcharge = 0;
+  const peakSurchargeTotal = 0;
   const dateObj = new Date(input.date);
   const dayOfWeek = dateObj.getDay();
   const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;

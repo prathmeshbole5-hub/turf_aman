@@ -385,12 +385,10 @@ export const BookingWizard: React.FC<BookingWizardProps> = ({
     else if (durationMinutes === 240) groundCharge = 3000;
     else groundCharge = 3000 + (hours - 4) * 750;
 
-    const isPeak = selectedStartSlot ? Boolean(selectedStartSlot.isPeak) : false;
-    const peakHourly = isPeak ? 250 : 0;
-    const peakSurchargeTotal = Math.round(peakHourly * hours);
+    const peakSurchargeTotal = 0;
 
     const baseHourly = Math.round(groundCharge / hours);
-    const effectiveHourly = baseHourly + peakHourly;
+    const effectiveHourly = baseHourly;
 
     const selectedAddOnsList = Object.entries(selectedAddOnCounts)
       .filter(([_, qty]) => qty > 0)
@@ -1320,7 +1318,7 @@ export const BookingWizard: React.FC<BookingWizardProps> = ({
                     Connecting to Arena Database...
                   </p>
                   <p style={{ color: '#666666', fontSize: '0.85rem' }}>
-                    Checking real-time slot bookings and floodlight schedules
+                    Checking real-time slot bookings and ground schedule
                   </p>
                 </div>
               ) : (
@@ -1411,21 +1409,11 @@ export const BookingWizard: React.FC<BookingWizardProps> = ({
                       badgeBg = '#FEF3C7';
                       badgeColor = '#B45309';
                       badgeBorder = '1px solid #FDE68A';
-                    } else if (slot.isPeak) {
-                      slotBg = '#FDF8EE'; // Champagne peak tint
-                      slotBorder = '1px solid #E9D9A7';
-                      textColor = '#191919';
-                      statusLabel = `₹${slot.rate} • Available`;
-                      statusColor = '#15803D';
-                      badgeText = 'Floodlights';
-                      badgeBg = '#FAF8F3';
-                      badgeColor = '#9D7916';
-                      badgeBorder = '1px solid #E9D9A7';
                     } else {
                       slotBg = '#FFFFFF';
                       slotBorder = '1px solid #E8E2D5';
                       textColor = '#191919';
-                      statusLabel = `₹${slot.rate} • Available`;
+                      statusLabel = 'Available';
                       statusColor = '#15803D';
                       badgeText = null;
                     }

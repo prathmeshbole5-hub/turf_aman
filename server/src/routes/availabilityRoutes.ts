@@ -58,7 +58,7 @@ router.get('/', (req, res) => {
       const endM = Math.min(1500, startM + stepMinutes);
       const startTimeStr = formatMinutesToTime(startM);
       const endTimeStr = formatMinutesToTime(endM);
-      const isPeak = startM >= 960 || endM > 960; // 4 PM to 12 AM
+      const isPeak = false; // Floodlight / peak surcharge removed per user instruction
 
       let status: 'AVAILABLE' | 'BOOKED' | 'MAINTENANCE' | 'PAST' | 'TEMPORARILY_HELD' = 'AVAILABLE';
       let bookingReference: string | undefined = undefined;
@@ -102,8 +102,8 @@ router.get('/', (req, res) => {
         startTime: startTimeStr,
         endTime: endTimeStr,
         status,
-        isPeak,
-        rate: isPeak ? 1150 : 900,
+        isPeak: false,
+        rate: 900,
         bookingReference,
         maintenanceReason,
       });

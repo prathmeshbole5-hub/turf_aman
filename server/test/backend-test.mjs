@@ -113,7 +113,7 @@ async function runTests() {
     const priceData = await priceRes.json();
     assert(priceRes.status === 200, 'Pricing calculation returns HTTP 200');
     assert(priceData.pricing.durationMinutes === 120, 'Duration 120 minutes verified');
-    assert(priceData.pricing.peakSurcharge > 0, 'Peak surcharge applied for evening slot');
+    assert(priceData.pricing.peakSurcharge === 0, 'No floodlight surcharge applied (flat rate verified)');
     assert(priceData.pricing.advancePercentage === 25, '25% advance deposit computed');
     assert(priceData.pricing.remainingBalance > 0, 'Remaining venue balance calculated');
   } catch (err) {

@@ -34,10 +34,10 @@ export function calculateAuthoritativePrice(input: PricingInput): PricingCalcula
   const startMinute = parseTimeToMinutes(input.startTime);
   const endMinute = startMinute + input.durationMinutes;
 
-  // Peak is between 4 PM (16*60 = 960) and 12 AM (24*60 = 1440)
-  const isPeak = startMinute >= 960 || endMinute > 960;
-  const peakHourlySurcharge = isPeak ? 250 : 0;
-  const peakSurchargeTotal = Math.round(peakHourlySurcharge * hours);
+  // Peak / Floodlight surcharge removed per user instruction
+  const isPeak = false;
+  const peakHourlySurcharge = 0;
+  const peakSurchargeTotal = 0;
 
   // Day of week check
   const dateObj = new Date(input.date);
