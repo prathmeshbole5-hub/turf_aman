@@ -4,6 +4,7 @@ import {
   getStoredSports, 
   getStoredGrounds, 
   getStoredBookings, 
+  saveBookings,
   saveStoredGrounds, 
   updateBookingStatus, 
   recordOfflinePayment, 
@@ -96,15 +97,59 @@ export const App: React.FC = () => {
   // Initial and reactive domain data fetch from backend API
   const refreshDomainData = async () => {
     try {
-      const [fetchedSports, fetchedGrounds, fetchedBookings] = await Promise.all([
+      const [fetchedSports, fetchedGrounds] = await Promise.all([
         apiClient.getSports(true),
         apiClient.getGrounds(),
-        apiClient.getMyBookings(),
       ]);
 
       if (fetchedSports && fetchedSports.length > 0) setSports(fetchedSports);
       if (fetchedGrounds && fetchedGrounds.length > 0) setGrounds(fetchedGrounds);
-      if (fetchedBookings && fetchedBookings.length > 0) setBookings(fetchedBookings);
+
+      // Fetch bookings (admin all bookings if admin session, or customer bookings)
+      let fetchedBookings: ConfirmedBooking[] | null = null;
+      if (apiClient.getToken()) {
+        try {
+          const adminData = await apiClient.getAdminBookings({ limit: '200' });
+          if (adminData && adminData.bookings && Array.isArray(adminData.bookings)) {
+            const sportsList = fetchedSports?.length ? fetchedSports : getStoredSports();
+            const groundsList = fetchedGrounds?.length ? fetchedGrounds : getStoredGrounds();
+            fetchedBookings = adminData.bookings.map((b: any) => ({
+              bookingId: b.id,
+              referenceCode: b.referenceCode,
+              createdAt: b.createdAt,
+              sport: sportsList.find((s) => s.id === b.sportId) || { id: b.sportId, name: b.sportName || 'Cricket' },
+              ground: groundsList.find((g) => g.id === b.groundId) || { id: b.groundId, name: b.groundName || 'Arena' },
+              date: b.date,
+              startTime: b.startTime,
+              endTime: b.endTime,
+              durationMinutes: b.durationMinutes,
+              customer: {
+                name: b.customerName,
+                phone: b.customerPhone,
+                email: b.customerEmail || '',
+                notes: b.notes,
+              },
+              pricing: b.pricing,
+              paymentMethod: b.paymentMethod === 'RAZORPAY' ? 'razorpay' : 'pay_at_venue',
+              paymentOption: b.paymentType === 'ADVANCE' ? 'advance' : 'full',
+              paymentStatus: b.paymentStatus.toLowerCase(),
+              bookingStatus: b.bookingStatus.toLowerCase(),
+              canCancelUntil: b.canCancelUntil,
+            }));
+          }
+        } catch (err) {
+          console.warn('Failed to fetch admin bookings, falling back to customer bookings:', err);
+        }
+      }
+
+      if (!fetchedBookings) {
+        fetchedBookings = await apiClient.getMyBookings();
+      }
+
+      if (fetchedBookings && fetchedBookings.length > 0) {
+        setBookings(fetchedBookings);
+        saveBookings(fetchedBookings);
+      }
     } catch {
       // Graceful local fallback
       setSports(getStoredSports());
@@ -127,6 +172,7 @@ export const App: React.FC = () => {
       }
     }
     navigateToView('admin');
+    await refreshDomainData();
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
@@ -171,6 +217,7 @@ export const App: React.FC = () => {
     } catch {
       cancelBooking(bookingId);
     }
+    await refreshDomainData();
     const updatedBookings = getStoredBookings();
     setBookings(updatedBookings);
     setInspectingBooking(updatedBookings.find((b) => b.bookingId === bookingId) || null);
@@ -182,6 +229,7 @@ export const App: React.FC = () => {
     } catch {
       recordOfflinePayment(bookingId, amount);
     }
+    await refreshDomainData();
     const updatedBookings = getStoredBookings();
     setBookings(updatedBookings);
     setInspectingBooking(updatedBookings.find((b) => b.bookingId === bookingId) || null);

@@ -188,6 +188,18 @@ export function calculateEndTimeOffset(startTimeStr: string, minutesToAdd: numbe
   return `${padH}:${padM} ${endModifier}`;
 }
 
+export function parseTimeToMinutes(timeStr: string): number {
+  if (!timeStr) return 0;
+  const parts = timeStr.trim().split(' ');
+  const [hStr, mStr] = parts[0].split(':');
+  let hour = parseInt(hStr, 10);
+  const min = parseInt(mStr || '0', 10);
+  const modifier = (parts[1] || '').toUpperCase();
+  if (modifier === 'PM' && hour < 12) hour += 12;
+  if (modifier === 'AM' && hour === 12) hour = 0;
+  return hour * 60 + min;
+}
+
 /**
  * Computes the prospective end time and feasibility for a slot given the current match duration.
  */

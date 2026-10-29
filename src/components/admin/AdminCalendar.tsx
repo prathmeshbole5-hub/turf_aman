@@ -1,7 +1,8 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import type { ConfirmedBooking } from '../../types';
 import { initialGrounds, initialSports } from '../../config/turfConfig';
-import { generateDaySlots } from '../../services/slotService';
+import { generateDaySlots, parseTimeToMinutes } from '../../services/slotService';
+import { apiClient } from '../../services/apiClient';
 import { 
   getStoredBlockedSlots, 
   addBlockedSlot, 
@@ -44,20 +45,58 @@ export const AdminCalendar: React.FC<AdminCalendarProps> = ({
 
   const dateStr = currentDate.toISOString().split('T')[0];
 
-  // Blocked maintenance slots from storage
+  // Blocked maintenance slots from storage & server
   const [blockedSlots, setBlockedSlots] = useState<BlockedSlotRecord[]>(getStoredBlockedSlots());
   const [newBlockReason, setNewBlockReason] = useState('Turf Surface Conditioning');
   const [blockStartHour, setBlockStartHour] = useState(14);
   const [blockEndHour, setBlockEndHour] = useState(15);
   const [isBlockingModalOpen, setIsBlockingModalOpen] = useState(false);
 
+  // Sync blocked slots from backend API
+  useEffect(() => {
+    let isCancelled = false;
+    apiClient
+      .getBlockedSlots()
+      .then((serverBlocks) => {
+        if (!isCancelled && Array.isArray(serverBlocks)) {
+          const mapped: BlockedSlotRecord[] = serverBlocks.map((b: any) => ({
+            id: b.id,
+            groundId: b.groundId,
+            date: b.date,
+            startHour: Math.floor(b.startMinuteOfDay / 60),
+            endHour: Math.ceil(b.endMinuteOfDay / 60),
+            reason: b.reason,
+          }));
+          if (mapped.length > 0) {
+            setBlockedSlots(mapped);
+          }
+        }
+      })
+      .catch((err) => {
+        console.warn('Failed to load server blocked slots:', err);
+      });
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [selectedGroundId, dateStr]);
+
   // Generate day slots for selected ground
   const daySlots = useMemo(() => {
     return generateDaySlots(dateStr, initialSports[0], selectedGround);
   }, [dateStr, selectedGround]);
 
+  // Format hour number to 12-hour AM/PM string
+  const formatHourString = (h: number) => {
+    const mod = h >= 12 && h < 24 ? 'PM' : 'AM';
+    let display = h % 12;
+    if (display === 0) display = 12;
+    const pad = display < 10 ? `0${display}` : `${display}`;
+    return `${pad}:00 ${mod}`;
+  };
+
   // Handle adding maintenance block
-  const handleAddMaintenanceBlock = (e: React.FormEvent) => {
+  const handleAddMaintenanceBlock = async (e: React.FormEvent) => {
     e.preventDefault();
     const newBlock: BlockedSlotRecord = {
       id: `block-${Date.now()}`,
@@ -67,14 +106,40 @@ export const AdminCalendar: React.FC<AdminCalendarProps> = ({
       endHour: blockEndHour,
       reason: newBlockReason,
     };
+
+    // Save locally
     addBlockedSlot(newBlock);
-    setBlockedSlots(getStoredBlockedSlots());
+    setBlockedSlots((prev) => [...prev, newBlock]);
     setIsBlockingModalOpen(false);
+
+    // Persist to server
+    try {
+      const res = await apiClient.blockSlot({
+        groundId: selectedGround.id,
+        date: dateStr,
+        startTime: formatHourString(blockStartHour),
+        endTime: formatHourString(blockEndHour),
+        reason: newBlockReason,
+      });
+      if (res && res.block) {
+        setBlockedSlots((prev) =>
+          prev.map((b) => (b.id === newBlock.id ? { ...b, id: res.block.id } : b))
+        );
+      }
+    } catch (err) {
+      console.warn('Backend block slot call failed:', err);
+    }
   };
 
-  const handleRemoveBlock = (blockId: string) => {
+  const handleRemoveBlock = async (blockId: string) => {
     removeBlockedSlot(blockId);
-    setBlockedSlots(getStoredBlockedSlots());
+    setBlockedSlots((prev) => prev.filter((b) => b.id !== blockId));
+
+    try {
+      await apiClient.unblockSlot(blockId);
+    } catch (err) {
+      console.warn('Backend unblock slot call failed:', err);
+    }
   };
 
   return (
@@ -280,19 +345,25 @@ export const AdminCalendar: React.FC<AdminCalendarProps> = ({
         {/* Hour Slots Timeline List */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '0.65rem' }}>
           {daySlots.map((slot) => {
-            // Check if there is an active confirmed booking for this slot
-            const matchedBooking = bookings.find((b) =>
-              b.ground.id === selectedGroundId &&
-              b.date === dateStr &&
-              b.startTime.includes(slot.startTime.split(':')[0]) && // match starting hour
-              b.bookingStatus === 'confirmed'
-            );
+            // Check if there is an active booking or conflict overlapping this slot interval
+            const slotStartM = parseTimeToMinutes(slot.startTime);
+            const slotEndM = parseTimeToMinutes(slot.endTime);
+
+            const matchedBooking = bookings.find((b) => {
+              const groundMatch = b.ground?.id === selectedGroundId || (b as any).groundId === selectedGroundId;
+              if (!groundMatch || b.date !== dateStr) return false;
+              const bStatus = (b.bookingStatus || '').toLowerCase();
+              if (bStatus === 'cancelled' || bStatus === 'failed') return false;
+              const bStartM = parseTimeToMinutes(b.startTime);
+              const bEndM = parseTimeToMinutes(b.endTime);
+              return Math.max(slotStartM, bStartM) < Math.min(slotEndM, bEndM);
+            });
 
             const isBlockedByMaint = blockedSlots.some(
               (b) => b.groundId === selectedGroundId && b.date === dateStr && slot.hour >= b.startHour && slot.hour < b.endHour
             );
 
-            const isBooked = !!matchedBooking || slot.status === 'booked';
+            const isBooked = Boolean(matchedBooking) || slot.status === 'booked';
 
             return (
               <div

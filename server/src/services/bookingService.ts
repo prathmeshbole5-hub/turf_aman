@@ -39,7 +39,7 @@ export function validateSlotIntervalAvailability(
   startTime: string,
   durationMinutes: number
 ): BookingValidationResult {
-  const ground = dbStore.grounds.get(groundId);
+  const ground = dbStore.getGround(groundId);
   if (!ground) {
     return { isAvailable: false, conflictReason: `Ground with ID '${groundId}' does not exist.` };
   }
@@ -48,24 +48,26 @@ export function validateSlotIntervalAvailability(
     return { isAvailable: false, conflictReason: `Ground '${ground.name}' is currently offline.` };
   }
 
+  const canonicalGroundId = ground.id;
   const requestedStart = parseTimeToMinutes(startTime);
   const requestedEnd = requestedStart + durationMinutes;
 
   // 1. Check existing confirmed or temporarily held bookings
   const now = new Date();
   for (const booking of dbStore.bookings.values()) {
-    if (booking.groundId !== groundId || booking.date !== date) {
+    const isMatchingGround = booking.groundId === canonicalGroundId || booking.groundId === groundId;
+    if (!isMatchingGround || booking.date !== date) {
       continue;
     }
 
-    // Ignore cancelled bookings
-    if (booking.bookingStatus === 'CANCELLED') {
+    // Ignore cancelled or failed bookings
+    if (booking.bookingStatus === 'CANCELLED' || booking.paymentStatus === 'FAILED') {
       continue;
     }
 
     // If pending with a hold, check if hold expired
     if (booking.bookingStatus === 'PENDING' && booking.holdExpiresAt) {
-      if (new Date(booking.holdExpiresAt) < now) {
+      if (new Date(booking.holdExpiresAt) <= now) {
         continue; // Expired hold, ignore
       }
     }
@@ -88,7 +90,8 @@ export function validateSlotIntervalAvailability(
 
   // 2. Check maintenance blocks
   for (const block of dbStore.blockedPeriods.values()) {
-    if (block.groundId !== groundId || block.date !== date) {
+    const isMatchingGround = block.groundId === canonicalGroundId || block.groundId === groundId;
+    if (!isMatchingGround || block.date !== date) {
       continue;
     }
 
@@ -117,12 +120,24 @@ export function validateSlotIntervalAvailability(
 export async function createBookingWithDoubleBookingProtection(
   input: CreateBookingInput
 ): Promise<BookingEntity> {
-  const { groundId, date, startTime, durationMinutes } = input;
+  const ground = dbStore.getGround(input.groundId);
+  if (!ground) {
+    throw new Error(`Ground '${input.groundId}' not found.`);
+  }
+
+  const sport = dbStore.getSport(input.sportId);
+  if (!sport) {
+    throw new Error(`Sport '${input.sportId}' not found.`);
+  }
+
+  const canonicalGroundId = ground.id;
+  const canonicalSportId = sport.id;
+  const { date, startTime, durationMinutes } = input;
 
   // Execute inside serialized ground lock
-  return await dbStore.withGroundLock(groundId, async () => {
+  return await dbStore.withGroundLock(canonicalGroundId, async () => {
     // Re-verify availability inside lock
-    const validation = validateSlotIntervalAvailability(groundId, date, startTime, durationMinutes);
+    const validation = validateSlotIntervalAvailability(canonicalGroundId, date, startTime, durationMinutes);
     if (!validation.isAvailable) {
       const error: any = new Error(validation.conflictReason || 'Double-booking conflict detected.');
       error.statusCode = 409; // HTTP 409 Conflict
@@ -132,8 +147,8 @@ export async function createBookingWithDoubleBookingProtection(
 
     // Calculate authoritative pricing
     const pricingInput: PricingInput = {
-      sportId: input.sportId,
-      groundId: input.groundId,
+      sportId: canonicalSportId,
+      groundId: canonicalGroundId,
       date: input.date,
       startTime: input.startTime,
       durationMinutes: input.durationMinutes,
@@ -143,9 +158,6 @@ export async function createBookingWithDoubleBookingProtection(
     };
 
     const pricing = calculateAuthoritativePrice(pricingInput);
-
-    const sport = dbStore.sports.get(input.sportId)!;
-    const ground = dbStore.grounds.get(input.groundId)!;
 
     const startMinute = parseTimeToMinutes(startTime);
     const endMinute = startMinute + durationMinutes;
@@ -169,9 +181,9 @@ export async function createBookingWithDoubleBookingProtection(
       customerName: input.customerName,
       customerPhone: input.customerPhone,
       customerEmail: input.customerEmail,
-      sportId: sport.id,
+      sportId: canonicalSportId,
       sportName: sport.name,
-      groundId: ground.id,
+      groundId: canonicalGroundId,
       groundName: ground.name,
       date,
       startTime,
@@ -191,6 +203,7 @@ export async function createBookingWithDoubleBookingProtection(
     };
 
     dbStore.bookings.set(booking.id, booking);
+    dbStore.saveToDisk();
 
     // Audit Log
     dbStore.auditLogs.push({

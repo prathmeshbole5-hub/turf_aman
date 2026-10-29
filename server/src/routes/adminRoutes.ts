@@ -178,9 +178,12 @@ router.post('/blocked-slots', (req: AuthenticatedRequest, res) => {
     const startM = parseTimeToMinutes(startTime);
     const endM = parseTimeToMinutes(endTime);
 
+    const ground = dbStore.getGround(groundId);
+    const canonicalGroundId = ground ? ground.id : groundId;
+
     const block: BlockedPeriodEntity = {
       id: `block_${Date.now()}`,
-      groundId,
+      groundId: canonicalGroundId,
       date,
       startTime,
       endTime,
@@ -192,6 +195,7 @@ router.post('/blocked-slots', (req: AuthenticatedRequest, res) => {
     };
 
     dbStore.blockedPeriods.set(block.id, block);
+    dbStore.saveToDisk();
 
     res.status(201).json({ success: true, message: 'Maintenance period blocked.', block });
   } catch (err: any) {
@@ -207,6 +211,7 @@ router.delete('/blocked-slots/:id', (req, res) => {
   }
 
   dbStore.blockedPeriods.delete(id);
+  dbStore.saveToDisk();
   res.json({ success: true, message: 'Maintenance block removed.' });
 });
 

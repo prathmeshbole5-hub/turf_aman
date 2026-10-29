@@ -14,12 +14,12 @@ export interface PricingInput {
 }
 
 export function calculateAuthoritativePrice(input: PricingInput): PricingCalculationResult {
-  const sport = dbStore.sports.get(input.sportId);
+  const sport = dbStore.getSport(input.sportId);
   if (!sport) {
     throw new Error(`Sport with ID '${input.sportId}' not found.`);
   }
 
-  const ground = dbStore.grounds.get(input.groundId);
+  const ground = dbStore.getGround(input.groundId);
   if (!ground) {
     throw new Error(`Ground with ID '${input.groundId}' not found.`);
   }
@@ -36,6 +36,8 @@ export function calculateAuthoritativePrice(input: PricingInput): PricingCalcula
 
   // Peak is between 4 PM (16*60 = 960) and 12 AM (24*60 = 1440)
   const isPeak = startMinute >= 960 || endMinute > 960;
+  const peakHourlySurcharge = isPeak ? 250 : 0;
+  const peakSurchargeTotal = Math.round(peakHourlySurcharge * hours);
 
   // Day of week check
   const dateObj = new Date(input.date);
@@ -45,7 +47,7 @@ export function calculateAuthoritativePrice(input: PricingInput): PricingCalcula
   // Tiered rate calculation: 1hr: 900, 2hr: 1800, 3hr: 2400, 4hr: 3000
   let groundCharge = 900;
   if (hours <= 1) {
-    groundCharge = 900;
+    groundCharge = Math.round(900 * hours);
   } else if (hours <= 2) {
     groundCharge = 1800;
   } else if (hours <= 3) {
@@ -56,16 +58,15 @@ export function calculateAuthoritativePrice(input: PricingInput): PricingCalcula
     groundCharge = 3000 + (hours - 4) * 750;
   }
 
-  const effectiveHourlyRate = Math.round(groundCharge / hours);
-  const baseHourlyRate = effectiveHourlyRate;
-  const peakSurchargeTotal = 0;
+  const baseHourlyRate = Math.round(groundCharge / hours);
+  const effectiveHourlyRate = baseHourlyRate + peakHourlySurcharge;
 
   // Add-ons total
   const addOns = input.selectedAddOns || [];
   const addOnsTotal = addOns.reduce((acc, item) => acc + item.price * (item.quantity || 1), 0);
 
-  // Subtotal
-  let subtotal = groundCharge + addOnsTotal;
+  // Subtotal = ground charge + peak surcharge + add-ons
+  let subtotal = groundCharge + peakSurchargeTotal + addOnsTotal;
 
   // Discount
   let discountPercentage = 0;

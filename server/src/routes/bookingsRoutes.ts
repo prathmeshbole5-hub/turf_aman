@@ -173,6 +173,8 @@ router.post('/:id/cancel', (req, res) => {
     createdAt: new Date().toISOString(),
   });
 
+  dbStore.saveToDisk();
+
   res.json({
     success: true,
     message: isEligibleForFullRefund
@@ -225,6 +227,8 @@ router.post('/:id/record-offline-payment', (req, res) => {
     }),
     createdAt: new Date().toISOString(),
   });
+
+  dbStore.saveToDisk();
 
   res.json({
     success: true,

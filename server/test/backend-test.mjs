@@ -297,8 +297,165 @@ async function runTests() {
       }),
     });
     assert(blockConflictRes.status === 409, 'Customer booking in maintenance window REJECTED with HTTP 409');
+    const blockConflictData = await blockConflictRes.json();
+    assert(blockConflictRes.status === 409, 'Customer booking in maintenance window REJECTED with HTTP 409');
+
+    // 8. Availability Endpoint Verification
+    console.log('\n--- TEST 8: Live Slot Availability & Ground Aliasing ---');
+    const availRes = await fetch(`${BASE_URL}/api/availability?groundId=ground-beta&date=${testDate}&step=60`);
+    const availData = await availRes.json();
+    assert(availRes.status === 200, 'Availability endpoint returns HTTP 200 with alias ground-beta');
+    assert(Array.isArray(availData.slots) && availData.slots.length > 0, 'Returns list of 1-hour slots');
+    const afternoonSlot = availData.slots.find((s) => s.startTime === '02:00 PM');
+    assert(afternoonSlot && afternoonSlot.status === 'MAINTENANCE', 'Blocked maintenance window reflected as MAINTENANCE in availability');
+
+    // 9. Cancellation Releases Slot Interval
+    console.log('\n--- TEST 9: Booking Cancellation Releases Interval ---');
+    // Create temporary booking for 11:00 AM - 12:00 PM
+    const tempBookRes = await fetch(`${BASE_URL}/api/bookings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        customerName: 'Cancel Test User',
+        customerPhone: '9988776655',
+        sportId: 'sport_cricket',
+        groundId: 'ground_main_arena',
+        date: testDate,
+        startTime: '11:00 AM',
+        durationMinutes: 60,
+        paymentMethod: 'VENUE_CASH',
+      }),
+    });
+    const tempBookData = await tempBookRes.json();
+    assert(tempBookRes.status === 201, 'Temp booking created for 11:00 AM');
+    const tempBookingId = tempBookData.booking.id;
+
+    // Verify 11:00 AM slot is BOOKED
+    const availCheck1 = await fetch(`${BASE_URL}/api/availability?groundId=ground_main_arena&date=${testDate}&step=60`);
+    const availCheck1Data = await availCheck1.json();
+    const slot11 = availCheck1Data.slots.find((s) => s.startTime === '11:00 AM');
+    assert(slot11 && slot11.status === 'BOOKED', '11:00 AM slot status is now BOOKED');
+
+    // Cancel booking
+    const cancelRes = await fetch(`${BASE_URL}/api/bookings/${tempBookingId}/cancel`, {
+      method: 'POST',
+    });
+    assert(cancelRes.status === 200, 'Booking cancelled successfully via API');
+
+    // Verify 11:00 AM slot is now AVAILABLE again
+    const availCheck2 = await fetch(`${BASE_URL}/api/availability?groundId=ground_main_arena&date=${testDate}&step=60`);
+    const availCheck2Data = await availCheck2.json();
+    const slot11After = availCheck2Data.slots.find((s) => s.startTime === '11:00 AM');
+    assert(slot11After && slot11After.status === 'AVAILABLE', '11:00 AM slot released and returned to AVAILABLE');
+
+    // 10. Multi-Hour Booking Checks Every Part of Interval
+    console.log('\n--- TEST 10: Multi-Hour Booking Interval Encasement ---');
+    // Book 05:00 PM to 07:00 PM (120 minutes)
+    const multiHourRes = await fetch(`${BASE_URL}/api/bookings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        customerName: 'Multi Hour Booker',
+        customerPhone: '9123456780',
+        sportId: 'sport_cricket',
+        groundId: 'ground_main_arena',
+        date: testDate,
+        startTime: '05:00 PM',
+        durationMinutes: 120, // 5:00 PM to 7:00 PM
+        paymentMethod: 'VENUE_CASH',
+      }),
+    });
+    assert(multiHourRes.status === 201, '2-hour booking (05:00 PM - 07:00 PM) created');
+
+    // Attempt overlapping 06:00 PM - 07:00 PM (second hour)
+    const secondHourRes = await fetch(`${BASE_URL}/api/bookings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        customerName: 'Second Hour Clashing',
+        customerPhone: '9123456781',
+        sportId: 'sport_cricket',
+        groundId: 'ground_main_arena',
+        date: testDate,
+        startTime: '06:00 PM',
+        durationMinutes: 60,
+        paymentMethod: 'VENUE_CASH',
+      }),
+    });
+    assert(secondHourRes.status === 409, 'Overlapping second hour (06:00 PM - 07:00 PM) REJECTED with 409');
+
+    // Attempt overlapping straddle 04:00 PM - 06:00 PM
+    const straddleRes = await fetch(`${BASE_URL}/api/bookings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        customerName: 'Straddle Clashing',
+        customerPhone: '9123456782',
+        sportId: 'sport_cricket',
+        groundId: 'ground_main_arena',
+        date: testDate,
+        startTime: '04:00 PM',
+        durationMinutes: 120, // 4:00 PM - 6:00 PM
+        paymentMethod: 'VENUE_CASH',
+      }),
+    });
+    assert(straddleRes.status === 409, 'Overlapping straddle (04:00 PM - 06:00 PM) REJECTED with 409');
+
+    // 11. Simultaneous Parallel Overlapping Requests Concurrency Race
+    console.log('\n--- TEST 11: High-Concurrency Simultaneous Overlapping Requests ---');
+    const raceSlotTime = '09:00 AM';
+    const req1 = fetch(`${BASE_URL}/api/bookings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        customerName: 'Racer A',
+        customerPhone: '9876543210',
+        sportId: 'sport_cricket',
+        groundId: 'ground_main_arena',
+        date: testDate,
+        startTime: raceSlotTime,
+        durationMinutes: 60,
+        paymentMethod: 'VENUE_CASH',
+      }),
+    });
+    const req2 = fetch(`${BASE_URL}/api/bookings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        customerName: 'Racer B',
+        customerPhone: '9876543211',
+        sportId: 'sport_cricket',
+        groundId: 'ground_main_arena',
+        date: testDate,
+        startTime: raceSlotTime,
+        durationMinutes: 60,
+        paymentMethod: 'VENUE_CASH',
+      }),
+    });
+
+    const [raceRes1, raceRes2] = await Promise.all([req1, req2]);
+    const statuses = [raceRes1.status, raceRes2.status].sort();
+    assert(
+      statuses[0] === 201 && statuses[1] === 409,
+      `Parallel race condition: Exactly one request succeeded (201) and one rejected (409). Got: [${statuses.join(', ')}]`
+    );
+
+    // 12. Unblock Maintenance Releases Period
+    console.log('\n--- TEST 12: Admin Unblock Releases Period ---');
+    const blockData = await blockRes.json();
+    const blockId = blockData.block.id;
+    const unblockRes = await fetch(`${BASE_URL}/api/admin/blocked-slots/${blockId}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${adminToken}` },
+    });
+    assert(unblockRes.status === 200, 'Maintenance block removed via admin API');
+
+    const availCheck3 = await fetch(`${BASE_URL}/api/availability?groundId=ground_box_cage&date=${testDate}&step=60`);
+    const availCheck3Data = await availCheck3.json();
+    const slot2pm = availCheck3Data.slots.find((s) => s.startTime === '02:00 PM');
+    assert(slot2pm && slot2pm.status === 'AVAILABLE', 'Unblocked slot returns to AVAILABLE');
   } catch (err) {
-    assert(false, `Maintenance block test failed: ${err.message}`);
+    assert(false, `Maintenance/Availability test failed: ${err.message}`);
   }
 
   // Final Summary

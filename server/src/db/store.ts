@@ -110,7 +110,10 @@ export interface AuditLogEntity {
   createdAt: string;
 }
 
-// In-Memory Database Store with Serialized Ground Mutex Locks
+import fs from 'fs';
+import path from 'path';
+
+// Persistent Database Store with Serialized Ground Mutex Locks
 class DatabaseStore {
   public users: Map<string, UserEntity> = new Map();
   public sports: Map<string, SportEntity> = new Map();
@@ -122,29 +125,133 @@ class DatabaseStore {
 
   // Ground Locks for Concurrency Control
   private groundMutexes: Map<string, Promise<void>> = new Map();
+  private dbFilePath: string = path.resolve(process.cwd(), 'server', 'data', 'turf_database.json');
 
   constructor() {
     this.seedInitialData();
+    this.loadFromDisk();
+  }
+
+  // Canonical ground resolution supporting IDs, slugs, and legacy frontend aliases
+  public getGround(idOrSlug?: string): GroundEntity | undefined {
+    if (!idOrSlug) return undefined;
+    const clean = idOrSlug.trim();
+    if (this.grounds.has(clean)) return this.grounds.get(clean);
+
+    // Slug or alias match
+    for (const g of this.grounds.values()) {
+      if (g.id === clean || g.slug === clean) return g;
+    }
+
+    if (clean === 'ground-alpha' || clean === 'main-arena') {
+      return this.grounds.get('ground_main_arena');
+    }
+    if (clean === 'ground-beta' || clean === 'ground-cage-1' || clean === 'box-cage' || clean === 'cage-arena') {
+      return this.grounds.get('ground_box_cage');
+    }
+
+    return undefined;
+  }
+
+  // Canonical sport resolution supporting IDs, slugs, and hyphen/underscore variants
+  public getSport(idOrSlug?: string): SportEntity | undefined {
+    if (!idOrSlug) return undefined;
+    const clean = idOrSlug.trim();
+    if (this.sports.has(clean)) return this.sports.get(clean);
+
+    for (const s of this.sports.values()) {
+      if (s.id === clean || s.slug === clean) return s;
+    }
+
+    const normalized = clean.replace(/-/g, '_');
+    if (this.sports.has(normalized)) return this.sports.get(normalized);
+
+    const withPrefix = normalized.startsWith('sport_') ? normalized : `sport_${normalized}`;
+    if (this.sports.has(withPrefix)) return this.sports.get(withPrefix);
+
+    return undefined;
   }
 
   // Serialized Transaction Execution for Double-Booking Prevention
   public async withGroundLock<T>(groundId: string, operation: () => Promise<T>): Promise<T> {
-    const currentLock = this.groundMutexes.get(groundId) || Promise.resolve();
+    const ground = this.getGround(groundId);
+    const lockKey = ground ? ground.id : groundId;
+
+    const currentLock = this.groundMutexes.get(lockKey) || Promise.resolve();
     let releaseLock: () => void;
     const nextLock = new Promise<void>((resolve) => {
       releaseLock = resolve;
     });
 
-    this.groundMutexes.set(groundId, currentLock.then(() => nextLock));
+    this.groundMutexes.set(lockKey, currentLock.then(() => nextLock));
 
     await currentLock;
     try {
-      return await operation();
+      const result = await operation();
+      this.saveToDisk();
+      return result;
     } finally {
       releaseLock!();
-      if (this.groundMutexes.get(groundId) === nextLock) {
-        this.groundMutexes.delete(groundId);
+      if (this.groundMutexes.get(lockKey) === nextLock) {
+        this.groundMutexes.delete(lockKey);
       }
+    }
+  }
+
+  // Persistence to prevent accidental in-memory permanent data loss
+  public saveToDisk(): void {
+    try {
+      const dataDir = path.dirname(this.dbFilePath);
+      if (!fs.existsSync(dataDir)) {
+        fs.mkdirSync(dataDir, { recursive: true });
+      }
+
+      const dump = {
+        bookings: Array.from(this.bookings.values()),
+        blockedPeriods: Array.from(this.blockedPeriods.values()),
+        payments: Array.from(this.payments.values()),
+        auditLogs: this.auditLogs,
+        users: Array.from(this.users.values()),
+        grounds: Array.from(this.grounds.values()),
+        sports: Array.from(this.sports.values()),
+        savedAt: new Date().toISOString(),
+      };
+
+      fs.writeFileSync(this.dbFilePath, JSON.stringify(dump, null, 2), 'utf-8');
+    } catch (err) {
+      console.error('Failed to write database persistence file:', err);
+    }
+  }
+
+  public loadFromDisk(): void {
+    try {
+      if (!fs.existsSync(this.dbFilePath)) return;
+      const raw = fs.readFileSync(this.dbFilePath, 'utf-8');
+      const data = JSON.parse(raw);
+
+      if (Array.isArray(data.bookings)) {
+        data.bookings.forEach((b: BookingEntity) => this.bookings.set(b.id, b));
+      }
+      if (Array.isArray(data.blockedPeriods)) {
+        data.blockedPeriods.forEach((bp: BlockedPeriodEntity) => this.blockedPeriods.set(bp.id, bp));
+      }
+      if (Array.isArray(data.payments)) {
+        data.payments.forEach((p: PaymentEntity) => this.payments.set(p.id, p));
+      }
+      if (Array.isArray(data.auditLogs)) {
+        this.auditLogs = data.auditLogs;
+      }
+      if (Array.isArray(data.users)) {
+        data.users.forEach((u: UserEntity) => this.users.set(u.id, u));
+      }
+      if (Array.isArray(data.grounds)) {
+        data.grounds.forEach((g: GroundEntity) => this.grounds.set(g.id, g));
+      }
+      if (Array.isArray(data.sports)) {
+        data.sports.forEach((s: SportEntity) => this.sports.set(s.id, s));
+      }
+    } catch (err) {
+      console.warn('Failed to load database from disk, proceeding with seeded memory store:', err);
     }
   }
 

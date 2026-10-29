@@ -16,7 +16,6 @@ import {
   cancelBooking as localCancelBooking,
   recordOfflinePayment as localRecordOfflinePayment,
 } from './storageService';
-import { generateDaySlots } from './slotService';
 
 const API_BASE_URL = (import.meta.env.VITE_API_URL as string) || '/api';
 const TOKEN_KEY = 'turfzone_auth_token';
@@ -281,25 +280,27 @@ class ApiClient {
   // AVAILABILITY SLOTS
   // -----------------------------------------------------------
   public async getAvailability(groundId: string, date: string): Promise<TimeSlot[]> {
-    try {
-      const data = await this.request<{ success: boolean; slots: any[] }>(`/availability?groundId=${groundId}&date=${date}`);
-      return data.slots.map((s) => ({
+    const data = await this.request<{ success: boolean; slots: any[] }>(
+      `/availability?groundId=${encodeURIComponent(groundId)}&date=${encodeURIComponent(date)}&step=60`
+    );
+    return data.slots.map((s) => {
+      let status: 'available' | 'booked' | 'held' | 'unavailable' = 'available';
+      const rawStatus = (s.status || '').toUpperCase();
+      if (rawStatus === 'BOOKED') status = 'booked';
+      else if (rawStatus === 'TEMPORARILY_HELD') status = 'held';
+      else if (rawStatus === 'MAINTENANCE' || rawStatus === 'PAST') status = 'unavailable';
+
+      return {
         id: s.id,
         startTime: s.startTime,
         endTime: s.endTime,
         hour: Math.floor(s.startMinute / 60),
-        status: s.status.toLowerCase() as any,
-        isPeak: s.isPeak,
-        rate: s.isPeak ? 1150 : 900,
-        blockedReason: s.maintenanceReason,
-      }));
-    } catch (err) {
-      console.warn('Backend /api/availability offline, generating local slots:', err);
-      const sports = getStoredSports();
-      const grounds = getStoredGrounds();
-      const ground = grounds.find((g) => g.id === groundId) || grounds[0];
-      return generateDaySlots(date, sports[0], ground);
-    }
+        status,
+        isPeak: Boolean(s.isPeak),
+        rate: s.rate || (s.isPeak ? 1150 : 900),
+        blockedReason: s.maintenanceReason || (rawStatus === 'PAST' ? 'Past Slot' : undefined),
+      };
+    });
   }
 
   // -----------------------------------------------------------

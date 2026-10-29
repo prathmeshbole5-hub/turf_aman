@@ -1,9 +1,9 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
-import type { ConfirmedBooking } from '../../types';
+import type { TimeSlot } from '../../types';
 import { initialSports, initialGrounds } from '../../config/turfConfig';
 import { generateDaySlots, validateConsecutiveSlots } from '../../services/slotService';
-import { addConfirmedBooking } from '../../services/storageService';
-import { X, PlusCircle, AlertCircle } from 'lucide-react';
+import { apiClient } from '../../services/apiClient';
+import { X, PlusCircle, AlertCircle, Loader2 } from 'lucide-react';
 
 interface AdminManualBookingModalProps {
   isOpen: boolean;
@@ -41,12 +41,43 @@ export const AdminManualBookingModal: React.FC<AdminManualBookingModalProps> = (
   const [selectedDate, setSelectedDate] = useState(todayStr);
   const [durationMinutes, setDurationMinutes] = useState(60);
 
-  const daySlots = useMemo(() => {
-    return generateDaySlots(selectedDate, selectedSport, selectedGround);
-  }, [selectedDate, selectedSport, selectedGround]);
-
-  const [selectedSlotId, setSelectedSlotId] = useState(daySlots[0]?.id || '');
+  const [daySlots, setDaySlots] = useState<TimeSlot[]>([]);
+  const [isLoadingSlots, setIsLoadingSlots] = useState(false);
+  const [selectedSlotId, setSelectedSlotId] = useState('');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // Fetch live availability from database
+  useEffect(() => {
+    if (!isOpen || !selectedGroundId || !selectedDate) return;
+    let isCancelled = false;
+    setIsLoadingSlots(true);
+
+    apiClient
+      .getAvailability(selectedGroundId, selectedDate)
+      .then((slots) => {
+        if (!isCancelled) {
+          setDaySlots(slots);
+          const firstAvail = slots.find((s) => s.status === 'available');
+          setSelectedSlotId(firstAvail ? firstAvail.id : slots[0]?.id || '');
+          setIsLoadingSlots(false);
+        }
+      })
+      .catch((err) => {
+        if (!isCancelled) {
+          console.warn('Fallback to local slots:', err);
+          const fallback = generateDaySlots(selectedDate, selectedSport, selectedGround);
+          setDaySlots(fallback);
+          const firstAvail = fallback.find((s) => s.status === 'available');
+          setSelectedSlotId(firstAvail ? firstAvail.id : fallback[0]?.id || '');
+          setIsLoadingSlots(false);
+        }
+      });
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [isOpen, selectedGroundId, selectedDate, selectedSport, selectedGround]);
 
   useEffect(() => {
     const dialog = dialogRef.current;
@@ -66,8 +97,9 @@ export const AdminManualBookingModal: React.FC<AdminManualBookingModalProps> = (
     }
   }, [compatibleGrounds, selectedGroundId]);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
     setErrorMessage(null);
 
     const slot = daySlots.find((s) => s.id === selectedSlotId);
@@ -82,68 +114,36 @@ export const AdminManualBookingModal: React.FC<AdminManualBookingModalProps> = (
       return;
     }
 
-    // Calculate rates
-    const hours = durationMinutes / 60;
-    const isPeak = slot.isPeak;
-    const effectiveHourlyRate = selectedSport.startingHourlyRate + (isPeak ? 250 : 0);
-    const groundCharge = effectiveHourlyRate * hours;
-    const taxAmount = groundCharge * 0.05;
-    const totalAmount = groundCharge + taxAmount;
-
-    const randomRefNum = Math.floor(1000 + Math.random() * 9000);
-    const bookingId = `TZ-WALK-${randomRefNum}`;
-    const referenceCode = `TZ-W${randomRefNum}`;
-
-    const newBooking: ConfirmedBooking = {
-      bookingId,
-      referenceCode,
-      createdAt: new Date().toISOString(),
-      sport: selectedSport,
-      ground: selectedGround,
-      date: selectedDate,
-      startTime: slot.startTime,
-      endTime: validation.calculatedEndTime,
-      durationMinutes,
-      customer: {
-        name: customerName,
-        phone: customerPhone,
-        email: customerEmail,
-        notes,
-      },
-      pricing: {
+    setIsSubmitting(true);
+    try {
+      await apiClient.createBooking({
+        customerName: customerName.trim(),
+        customerPhone: customerPhone.trim(),
+        customerEmail: customerEmail.trim() || undefined,
         sportId: selectedSport.id,
-        sportName: selectedSport.name,
         groundId: selectedGround.id,
-        groundName: selectedGround.name,
         date: selectedDate,
         startTime: slot.startTime,
-        endTime: validation.calculatedEndTime,
         durationMinutes,
-        baseHourlyRate: selectedSport.startingHourlyRate,
-        effectiveHourlyRate,
-        groundCharge,
-        peakSurcharge: isPeak ? 250 * hours : 0,
         selectedAddOns: [],
-        addOnsTotal: 0,
-        discountPercentage: 0,
-        discountAmount: 0,
-        subtotal: groundCharge,
-        taxAmount,
-        totalAmount,
-        advancePercentage: 100,
-        advanceAmount: totalAmount,
-        remainingBalance: 0,
-      },
-      paymentMethod: 'pay_at_venue',
-      paymentOption: 'full',
-      paymentStatus: 'paid_online', // Recorded as paid in cash/card at venue
-      bookingStatus: 'confirmed',
-      canCancelUntil: '',
-    };
+        paymentMethod: 'VENUE_CASH',
+        paymentOption: 'full',
+        notes: notes.trim() || 'Walk-in offline booking',
+      });
 
-    addConfirmedBooking(newBooking);
-    onBookingCreated();
-    onClose();
+      // Clear input fields
+      setCustomerName('');
+      setCustomerPhone('');
+      setCustomerEmail('');
+      setNotes('Walk-in offline booking');
+
+      onBookingCreated();
+      onClose();
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Server rejected booking due to conflict or error.');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
@@ -400,6 +400,7 @@ export const AdminManualBookingModal: React.FC<AdminManualBookingModalProps> = (
               <select
                 value={selectedSlotId}
                 onChange={(e) => setSelectedSlotId(e.target.value)}
+                disabled={isLoadingSlots}
                 style={{
                   width: '100%',
                   padding: '0.75rem',
@@ -414,11 +415,14 @@ export const AdminManualBookingModal: React.FC<AdminManualBookingModalProps> = (
                   outline: 'none',
                 }}
               >
-                {daySlots.map((s) => (
-                  <option key={s.id} value={s.id} disabled={s.status !== 'available'}>
-                    {s.startTime} {s.status !== 'available' ? `(${s.status})` : `(₹${s.rate})`}
-                  </option>
-                ))}
+                {isLoadingSlots && <option value="">Fetching live ground slots...</option>}
+                {!isLoadingSlots && daySlots.length === 0 && <option value="">No slots configured</option>}
+                {!isLoadingSlots &&
+                  daySlots.map((s) => (
+                    <option key={s.id} value={s.id} disabled={s.status !== 'available'}>
+                      {s.startTime} {s.status !== 'available' ? `(${s.status.toUpperCase()})` : `(₹${s.rate})`}
+                    </option>
+                  ))}
               </select>
             </div>
           </div>
@@ -449,11 +453,35 @@ export const AdminManualBookingModal: React.FC<AdminManualBookingModalProps> = (
 
         {/* Action Button */}
         <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'flex-end', gap: '0.75rem' }}>
-          <button type="button" onClick={onClose} className="btn btn-secondary" style={{ backgroundColor: '#FFFFFF', border: '1px solid #E8E2D5', color: '#191919', minHeight: '44px' }}>
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={isSubmitting}
+            className="btn btn-secondary"
+            style={{ backgroundColor: '#FFFFFF', border: '1px solid #E8E2D5', color: '#191919', minHeight: '44px' }}
+          >
             Cancel
           </button>
-          <button type="submit" className="btn btn-primary" style={{ backgroundColor: '#C9A227', color: '#191919', fontWeight: 700, minHeight: '44px' }}>
-            <span>Confirm & Reserve Slot</span>
+          <button
+            type="submit"
+            disabled={isSubmitting || isLoadingSlots}
+            className="btn btn-primary"
+            style={{
+              backgroundColor: '#C9A227',
+              color: '#191919',
+              fontWeight: 700,
+              minHeight: '44px',
+              opacity: isSubmitting || isLoadingSlots ? 0.7 : 1,
+            }}
+          >
+            {isSubmitting ? (
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.5rem' }}>
+                <Loader2 size={16} className="animate-spin" />
+                <span>Reserving...</span>
+              </span>
+            ) : (
+              <span>Confirm & Reserve Slot</span>
+            )}
           </button>
         </div>
       </form>

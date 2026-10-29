@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import type { 
   Sport, 
   Ground, 
@@ -10,8 +10,7 @@ import type {
   PaymentOption
 } from '../../types';
 import { initialSports, initialGrounds, initialAddOns, brandConfig } from '../../config/turfConfig';
-import { generateDaySlots, validateConsecutiveSlots, DURATION_OPTIONS, getSlotEndForDuration } from '../../services/slotService';
-import { addConfirmedBooking } from '../../services/storageService';
+import { validateConsecutiveSlots, DURATION_OPTIONS, getSlotEndForDuration } from '../../services/slotService';
 import { apiClient } from '../../services/apiClient';
 import { RazorpayModal } from './RazorpayModal';
 import { 
@@ -30,7 +29,8 @@ import {
   Building2, 
   Printer, 
   QrCode,
-  Sliders
+  Sliders,
+  RotateCw
 } from 'lucide-react';
 
 interface BookingWizardProps {
@@ -94,10 +94,77 @@ export const BookingWizard: React.FC<BookingWizardProps> = ({
   const [slotConflictError, setSlotConflictError] = useState<string | null>(null);
   const [selectionMode, setSelectionMode] = useState<'preset' | 'manual'>('preset');
 
-  // Generate slots dynamically for the chosen date, sport, ground
-  const daySlots = useMemo(() => {
-    return generateDaySlots(selectedDate, selectedSport, selectedGround);
-  }, [selectedDate, selectedSport, selectedGround]);
+  // Real-time slot availability from actual database
+  const [daySlots, setDaySlots] = useState<TimeSlot[]>([]);
+  const [isLoadingSlots, setIsLoadingSlots] = useState<boolean>(true);
+  const [slotsError, setSlotsError] = useState<string | null>(null);
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
+  const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
+
+  // Authoritative real-time slot fetcher
+  const fetchAvailability = useCallback(async (isSilent = false) => {
+    if (!isSilent) {
+      setIsRefreshing(true);
+    }
+    try {
+      const fetched = await apiClient.getAvailability(selectedGround.id, selectedDate);
+      setDaySlots(fetched);
+      setLastUpdated(new Date());
+      setSlotsError(null);
+
+      // Verify currently selected slot is still available
+      if (selectedStartSlot) {
+        const stillAvailable = fetched.find(
+          (s) => (s.id === selectedStartSlot.id || s.startTime === selectedStartSlot.startTime) && s.status === 'available'
+        );
+        if (!stillAvailable) {
+          setSelectedStartSlot(null);
+          setSlotConflictError('The slot you previously selected was just reserved by another player. Please select another slot.');
+        }
+      }
+    } catch (err: any) {
+      console.warn('Real-time availability fetch failed:', err);
+      if (daySlots.length === 0) {
+        setSlotsError(err?.message || 'Could not reach server for live slot schedule. Please verify your connection.');
+      } else if (!isSilent) {
+        setSlotConflictError('Unable to refresh slots. Please check your network connection.');
+      }
+    } finally {
+      setIsLoadingSlots(false);
+      setIsRefreshing(false);
+    }
+  }, [selectedGround.id, selectedDate, selectedStartSlot, daySlots.length]);
+
+  // Initial and trigger-based availability fetch
+  useEffect(() => {
+    setIsLoadingSlots(true);
+    fetchAvailability(false);
+  }, [selectedGround.id, selectedDate]);
+
+  // Non-overlapping 12-second live polling interval while customer is on Step 1
+  useEffect(() => {
+    if (currentStep !== 1) return;
+
+    const intervalId = setInterval(() => {
+      fetchAvailability(true);
+    }, 12000);
+
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') {
+        fetchAvailability(true);
+      }
+    };
+
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('focus', onVisible);
+
+    return () => {
+      clearInterval(intervalId);
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('focus', onVisible);
+    };
+  }, [currentStep, fetchAvailability]);
 
   // Selected add-ons: map addonId -> quantity
   const [selectedAddOnCounts, setSelectedAddOnCounts] = useState<Record<string, number>>({});
@@ -309,34 +376,53 @@ export const BookingWizard: React.FC<BookingWizardProps> = ({
 
   // Live Comprehensive Pricing Breakdown
   const pricingBreakdown: BookingPricingBreakdown = useMemo(() => {
-    const getGroundCharge = (mins: number) => {
-      if (mins === 60) return 900;
-      if (mins === 120) return 1800;
-      if (mins === 180) return 2400;
-      if (mins === 240) return 3000;
-      return (mins / 60) * 900;
-    };
-
-    const groundCharge = getGroundCharge(durationMinutes);
     const hours = durationMinutes / 60;
-    const effectiveHourly = groundCharge / hours;
-    const baseHourly = effectiveHourly;
-    const peakSurchargeTotal = 0;
 
-    const selectedAddOnsList: any[] = [];
-    const addOnsTotal = 0;
-    const subtotal = groundCharge;
+    let groundCharge = 900;
+    if (durationMinutes === 60) groundCharge = 900;
+    else if (durationMinutes === 120) groundCharge = 1800;
+    else if (durationMinutes === 180) groundCharge = 2400;
+    else if (durationMinutes === 240) groundCharge = 3000;
+    else groundCharge = 3000 + (hours - 4) * 750;
+
+    const isPeak = selectedStartSlot ? Boolean(selectedStartSlot.isPeak) : false;
+    const peakHourly = isPeak ? 250 : 0;
+    const peakSurchargeTotal = Math.round(peakHourly * hours);
+
+    const baseHourly = Math.round(groundCharge / hours);
+    const effectiveHourly = baseHourly + peakHourly;
+
+    const selectedAddOnsList = Object.entries(selectedAddOnCounts)
+      .filter(([_, qty]) => qty > 0)
+      .map(([addonId, qty]) => {
+        const item = initialAddOns.find((a) => a.id === addonId) || {
+          id: addonId,
+          name: addonId,
+          description: '',
+          price: 0,
+          priceType: 'per_session' as const,
+          icon: 'Package',
+        };
+        return {
+          addon: item,
+          quantity: qty,
+          total: item.price * qty,
+        };
+      });
+
+    const addOnsTotal = selectedAddOnsList.reduce((acc, item) => acc + item.total, 0);
+    const subtotal = groundCharge + peakSurchargeTotal + addOnsTotal;
 
     const discountPercentage = appliedCoupon ? appliedCoupon.discountPercentage : 0;
-    const discountAmount = (subtotal * discountPercentage) / 100;
+    const discountAmount = appliedCoupon ? Math.round(subtotal * (appliedCoupon.discountPercentage / 100)) : 0;
     const discountedSubtotal = subtotal - discountAmount;
 
-    const taxAmount = 0;
-    const totalAmount = discountedSubtotal;
+    const taxAmount = Math.round(discountedSubtotal * 0.05 * 100) / 100;
+    const totalAmount = Math.round((discountedSubtotal + taxAmount) * 100) / 100;
 
-    const advancePercentage = 25;
-    const advanceAmount = paymentOption === 'advance' ? (totalAmount * 0.25) : totalAmount;
-    const remainingBalance = paymentOption === 'advance' ? (totalAmount - advanceAmount) : 0;
+    const advancePercentage = paymentOption === 'advance' ? 25 : 100;
+    const advanceAmount = paymentOption === 'advance' ? Math.round(totalAmount * 0.25 * 100) / 100 : totalAmount;
+    const remainingBalance = Math.round((totalAmount - advanceAmount) * 100) / 100;
 
     const validation = selectedStartSlot
       ? validateConsecutiveSlots(selectedStartSlot, durationMinutes, daySlots)
@@ -398,11 +484,13 @@ export const BookingWizard: React.FC<BookingWizardProps> = ({
   // Finalize and persist booking
   const finalizeBooking = async (
     method: PaymentMethod,
-    status: 'paid_online' | 'advance_paid' | 'pay_at_venue',
+    _status: 'paid_online' | 'advance_paid' | 'pay_at_venue',
   ) => {
-    try {
-      setSlotConflictError(null);
+    if (isSubmitting) return;
+    setIsSubmitting(true);
+    setSlotConflictError(null);
 
+    try {
       // Attempt authoritative booking creation on Express backend
       const serverBooking = await apiClient.createBooking({
         customerName: customerInfo.name,
@@ -425,41 +513,18 @@ export const BookingWizard: React.FC<BookingWizardProps> = ({
       setCurrentStep(3); // Confirmation screen
     } catch (err: any) {
       setIsRazorpayOpen(false);
-      console.warn('Booking creation caught error:', err);
+      console.error('Booking creation error:', err);
 
       if (err.statusCode === 409) {
         // Double-booking collision detected by backend
-        setSlotConflictError(err.message || 'Double-booking conflict: This interval was reserved by another player. Please select another time slot.');
+        setSlotConflictError(err.message || 'Double-booking conflict: This interval was just reserved by another player. Please select another time slot.');
         setCurrentStep(1); // Redirect back to slot selection
+        fetchAvailability(true);
       } else {
-        // Local fallback
-        const randomRefNum = Math.floor(1000 + Math.random() * 9000);
-        const bookingId = `TZ-2026-${randomRefNum}`;
-        const referenceCode = `TZ-${randomRefNum}`;
-
-        const fallbackBooking: ConfirmedBooking = {
-          bookingId,
-          referenceCode,
-          createdAt: new Date().toISOString(),
-          sport: selectedSport,
-          ground: selectedGround,
-          date: selectedDate,
-          startTime: pricingBreakdown.startTime,
-          endTime: pricingBreakdown.endTime,
-          durationMinutes: pricingBreakdown.durationMinutes,
-          customer: customerInfo,
-          pricing: pricingBreakdown,
-          paymentMethod: method,
-          paymentOption,
-          paymentStatus: status,
-          bookingStatus: 'confirmed',
-          canCancelUntil: new Date(new Date(selectedDate).getTime() - 12 * 3600 * 1000).toISOString(),
-        };
-
-        addConfirmedBooking(fallbackBooking);
-        setConfirmedBooking(fallbackBooking);
-        setCurrentStep(3);
+        setSlotConflictError(err.message || 'Unable to confirm booking on the server. Please check your connection and try again.');
       }
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -1143,149 +1208,344 @@ export const BookingWizard: React.FC<BookingWizardProps> = ({
                 </div>
               )}
 
-              {/* Time Slots Grid (Section 8 Exact Styling) */}
+              {/* Live Real-Time Availability Header Bar */}
               <div
                 style={{
-                  display: 'grid',
-                  gridTemplateColumns: 'repeat(auto-fill, minmax(min(100%, 140px), 1fr))',
-                  gap: 'clamp(0.55rem, 1.5vw, 0.85rem)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  padding: '0.65rem 1rem',
+                  backgroundColor: '#FFFFFF',
+                  border: '1px solid #E8E2D5',
+                  borderRadius: 'var(--radius-md)',
+                  marginBottom: '1rem',
+                  flexWrap: 'wrap',
+                  gap: '0.65rem',
                 }}
               >
-                {daySlots.map((slot) => {
-                  const isInRange = isSlotInSelectedRange(slot);
-                  const isStartSlot = selectedStartSlot?.id === slot.id;
-                  const isBooked = slot.status === 'booked';
-                  const isHeld = slot.status === 'held';
-                  const isUnavailable = slot.status === 'unavailable';
-                  const isHardDisabled = isBooked || isHeld || isUnavailable;
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+                  <span
+                    style={{
+                      display: 'inline-block',
+                      width: '8px',
+                      height: '8px',
+                      borderRadius: '50%',
+                      backgroundColor: '#16A34A',
+                      boxShadow: '0 0 8px rgba(22, 163, 74, 0.7)',
+                    }}
+                  />
+                  <span style={{ fontSize: '0.8125rem', fontWeight: 700, color: '#191919' }}>
+                    Live Ground Availability
+                  </span>
+                  <span style={{ fontSize: '0.75rem', color: '#666666' }}>
+                    • Verified against live database
+                  </span>
+                </div>
 
-                  // Dynamic prospective end time based on selected match duration
-                  const slotEndInfo = getSlotEndForDuration(slot, durationMinutes, daySlots);
-                  const canStartDuration = slotEndInfo.isAvailableForDuration;
-                  const isClickable = !isHardDisabled && (selectionMode === 'manual' || canStartDuration || isInRange);
-
-                  const displayEndTime = isInRange
-                    ? (isStartSlot ? pricingBreakdown.endTime : slotEndInfo.endTime)
-                    : slotEndInfo.endTime;
-
-                  // Section 8 exact background and border color resolution:
-                  // Available: white background with subtle beige border.
-                  // Selected: gold background with dark text.
-                  // Booked: light gray background with muted text and disabled interaction.
-                  // Unavailable: clearly disabled gray state.
-                  // Peak pricing: subtle champagne highlight.
-                  let slotBg = '#FFFFFF';
-                  let slotBorder = '1px solid #E8E2D5';
-                  let textColor = '#191919';
-
-                  if (isInRange) {
-                    slotBg = '#C9A227';
-                    slotBorder = '2px solid #9D7916';
-                    textColor = '#191919';
-                  } else if (isBooked) {
-                    slotBg = '#F3F3F3';
-                    slotBorder = '1px solid #E2E2E2';
-                    textColor = '#999999';
-                  } else if (isHeld) {
-                    slotBg = '#FBF6EB';
-                    slotBorder = '1px solid #E9D9A7';
-                    textColor = '#B7791F';
-                  } else if (isUnavailable || !canStartDuration) {
-                    slotBg = '#F8F8F8';
-                    slotBorder = '1px solid #EBEBEB';
-                    textColor = '#AAAAAA';
-                  } else if (slot.isPeak) {
-                    slotBg = '#FDF8EE'; // subtle champagne highlight
-                    slotBorder = '1px solid #E9D9A7';
-                    textColor = '#191919';
-                  }
-
-                  return (
-                    <div
-                      key={slot.id}
-                      onClick={() => isClickable && handleSlotSelect(slot)}
-                      style={{
-                        padding: '1rem',
-                        borderRadius: 'var(--radius-md)',
-                        border: slotBorder,
-                        backgroundColor: slotBg,
-                        cursor: isClickable ? 'pointer' : 'not-allowed',
-                        opacity: isHardDisabled ? 0.6 : !canStartDuration && !isInRange ? 0.65 : 1,
-                        transition: 'all var(--transition-fast)',
-                        boxShadow: isInRange ? '0 4px 18px rgba(201, 162, 39, 0.3)' : 'var(--shadow-subtle)',
-                        position: 'relative',
-                        display: 'flex',
-                        flexDirection: 'column',
-                        justifyContent: 'space-between',
-                      }}
-                      onMouseEnter={(e) => {
-                        if (isClickable && !isInRange) {
-                          e.currentTarget.style.borderColor = '#C9A227';
-                          e.currentTarget.style.boxShadow = '0 4px 12px rgba(201, 162, 39, 0.15)';
-                        }
-                      }}
-                      onMouseLeave={(e) => {
-                        if (isClickable && !isInRange) {
-                          e.currentTarget.style.borderColor = slot.isPeak ? '#E9D9A7' : '#E8E2D5';
-                          e.currentTarget.style.boxShadow = 'var(--shadow-subtle)';
-                        }
-                      }}
-                    >
-                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.4rem' }}>
-                        <span style={{ fontFamily: 'var(--font-heading)', fontSize: '1rem', fontWeight: 700, color: textColor }}>
-                          {slot.startTime}
-                        </span>
-                        {isInRange && isStartSlot && (
-                          <span style={{ fontSize: '0.65rem', backgroundColor: '#191919', color: '#FFFFFF', fontWeight: 800, padding: '0.15rem 0.4rem', borderRadius: '4px', textTransform: 'uppercase' }}>
-                            {durationMinutes / 60}h Selected
-                          </span>
-                        )}
-                        {isInRange && !isStartSlot && (
-                          <span style={{ fontSize: '0.65rem', backgroundColor: 'rgba(25, 25, 25, 0.12)', color: '#191919', border: '1px solid #191919', fontWeight: 800, padding: '0.15rem 0.4rem', borderRadius: '4px', textTransform: 'uppercase' }}>
-                            In Range
-                          </span>
-                        )}
-                        {!isInRange && slot.isPeak && !isHardDisabled && canStartDuration && (
-                          <span style={{ fontSize: '0.65rem', color: '#9D7916', fontWeight: 700, textTransform: 'uppercase', backgroundColor: '#FAF8F3', padding: '0.15rem 0.4rem', borderRadius: '4px', border: '1px solid #E9D9A7' }}>
-                            Floodlights
-                          </span>
-                        )}
-                        {isBooked && (
-                          <span style={{ fontSize: '0.65rem', color: '#D94343', fontWeight: 700, textTransform: 'uppercase' }}>
-                            Booked
-                          </span>
-                        )}
-                        {isHeld && (
-                          <span style={{ fontSize: '0.65rem', color: '#B7791F', fontWeight: 700, textTransform: 'uppercase' }}>
-                            Held (4m)
-                          </span>
-                        )}
-                        {isUnavailable && (
-                          <span style={{ fontSize: '0.65rem', color: '#888888', fontWeight: 700, textTransform: 'uppercase' }}>
-                            Prep
-                          </span>
-                        )}
-                        {!isHardDisabled && !canStartDuration && !isInRange && (
-                          <span style={{ fontSize: '0.65rem', color: '#D94343', fontWeight: 700, textTransform: 'uppercase' }}>
-                            {slotEndInfo.unavailabilityReason === 'Exceeds Closing (01:00 AM)' ? 'Past Close' : 'Conflict'}
-                          </span>
-                        )}
-                      </div>
-
-                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '0.75rem', color: isInRange ? '#191919' : '#666666' }}>
-                        <span style={{ fontWeight: isInRange ? 600 : 400 }}>
-                          To {displayEndTime}
-                        </span>
-                        {!isHardDisabled && (
-                          <span style={{ fontWeight: 700, color: isInRange ? '#191919' : canStartDuration ? '#218653' : '#888888' }}>
-                            {isInRange ? '✓ Selected' : canStartDuration ? 'Available' : 'Unavailable'}
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
+                  {lastUpdated && (
+                    <span style={{ fontSize: '0.75rem', color: '#666666' }}>
+                      Last synced: {lastUpdated.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                    </span>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => fetchAvailability(false)}
+                    disabled={isRefreshing || isLoadingSlots}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '0.35rem',
+                      fontSize: '0.75rem',
+                      fontWeight: 700,
+                      color: '#9D7916',
+                      backgroundColor: '#FAF8F3',
+                      border: '1px solid #E9D9A7',
+                      borderRadius: '4px',
+                      padding: '0.25rem 0.6rem',
+                      cursor: isRefreshing || isLoadingSlots ? 'not-allowed' : 'pointer',
+                      transition: 'all 0.15s ease',
+                    }}
+                  >
+                    <RotateCw size={12} className={isRefreshing ? 'animate-spin' : ''} />
+                    <span>{isRefreshing ? 'Syncing...' : 'Sync Now'}</span>
+                  </button>
+                </div>
               </div>
+
+              {/* Error banner with retry if availability fetch failed */}
+              {slotsError && (
+                <div
+                  style={{
+                    backgroundColor: '#FEF2F2',
+                    border: '1.5px solid #FCA5A5',
+                    borderRadius: 'var(--radius-md)',
+                    padding: '1rem',
+                    marginBottom: '1rem',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: '1rem',
+                    flexWrap: 'wrap',
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: '#991B1B' }}>
+                    <AlertCircle size={20} style={{ flexShrink: 0 }} />
+                    <span style={{ fontSize: '0.875rem', fontWeight: 600 }}>{slotsError}</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => fetchAvailability(false)}
+                    className="btn btn-sm btn-secondary"
+                    style={{ backgroundColor: '#FFFFFF', borderColor: '#FCA5A5', color: '#991B1B', fontWeight: 700 }}
+                  >
+                    <RotateCw size={14} /> Retry Connection
+                  </button>
+                </div>
+              )}
+
+              {/* Initial Loading State */}
+              {isLoadingSlots && daySlots.length === 0 ? (
+                <div
+                  style={{
+                    padding: '3rem 1.5rem',
+                    textAlign: 'center',
+                    backgroundColor: '#FFFFFF',
+                    borderRadius: 'var(--radius-md)',
+                    border: '1px solid #E8E2D5',
+                  }}
+                >
+                  <RotateCw size={28} className="animate-spin" style={{ color: '#C9A227', margin: '0 auto 1rem' }} />
+                  <p style={{ color: '#191919', fontWeight: 700, fontSize: '1rem', marginBottom: '0.25rem' }}>
+                    Connecting to Arena Database...
+                  </p>
+                  <p style={{ color: '#666666', fontSize: '0.85rem' }}>
+                    Checking real-time slot bookings and floodlight schedules
+                  </p>
+                </div>
+              ) : (
+                /* Time Slots Grid (Requirement 6 Layout) */
+                <div
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns: 'repeat(auto-fill, minmax(min(100%, 185px), 1fr))',
+                    gap: '0.75rem',
+                  }}
+                >
+                  {daySlots.map((slot) => {
+                    const isInRange = isSlotInSelectedRange(slot);
+                    const isStartSlot = selectedStartSlot?.id === slot.id || selectedStartSlot?.startTime === slot.startTime;
+                    const isBooked = slot.status === 'booked';
+                    const isHeld = slot.status === 'held';
+                    const isUnavailable = slot.status === 'unavailable';
+                    const isHardDisabled = isBooked || isHeld || isUnavailable;
+
+                    // Dynamic prospective end time based on selected match duration
+                    const slotEndInfo = getSlotEndForDuration(slot, durationMinutes, daySlots);
+                    const canStartDuration = slotEndInfo.isAvailableForDuration;
+                    const isClickable = !isHardDisabled && (selectionMode === 'manual' || canStartDuration || isInRange);
+
+                    const displayEndTime = isInRange
+                      ? (isStartSlot ? pricingBreakdown.endTime : slotEndInfo.endTime)
+                      : slotEndInfo.endTime;
+
+                    // High contrast, WCAG AA compliant colors matching white & gold theme:
+                    let slotBg = '#FFFFFF';
+                    let slotBorder = '1px solid #E8E2D5';
+                    let textColor = '#191919';
+                    let statusLabel = 'Available';
+                    let statusColor = '#15803D'; // Accessible dark green
+                    let badgeText: string | null = null;
+                    let badgeBg = '#FAF8F3';
+                    let badgeColor = '#9D7916';
+                    let badgeBorder = '1px solid #E9D9A7';
+
+                    if (isInRange) {
+                      slotBg = '#C9A227';
+                      slotBorder = '2px solid #9D7916';
+                      textColor = '#191919';
+                      statusLabel = isStartSlot ? 'Selected Start' : 'In Selection';
+                      statusColor = '#191919';
+                      badgeText = isStartSlot ? `${durationMinutes / 60}h Selected` : 'In Range';
+                      badgeBg = isStartSlot ? '#191919' : 'rgba(25, 25, 25, 0.15)';
+                      badgeColor = isStartSlot ? '#FFFFFF' : '#191919';
+                      badgeBorder = isStartSlot ? '1px solid #191919' : '1px solid #191919';
+                    } else if (isBooked) {
+                      slotBg = '#F5F5F4';
+                      slotBorder = '1px solid #D6D3D1';
+                      textColor = '#44403C';
+                      statusLabel = 'Booked';
+                      statusColor = '#991B1B';
+                      badgeText = 'Booked';
+                      badgeBg = '#FEE2E2';
+                      badgeColor = '#991B1B';
+                      badgeBorder = '1px solid #FECACA';
+                    } else if (isHeld) {
+                      slotBg = '#FFFBEB';
+                      slotBorder = '1px solid #FDE68A';
+                      textColor = '#78350F';
+                      statusLabel = 'Held (Checkout)';
+                      statusColor = '#92400E';
+                      badgeText = 'Holding';
+                      badgeBg = '#FEF3C7';
+                      badgeColor = '#92400E';
+                      badgeBorder = '1px solid #FDE68A';
+                    } else if (isUnavailable) {
+                      slotBg = '#F3F4F6';
+                      slotBorder = '1px solid #E5E7EB';
+                      textColor = '#4B5563';
+                      const isPast = slot.blockedReason === 'Past Slot';
+                      statusLabel = isPast ? 'Past Slot' : 'Unavailable';
+                      statusColor = isPast ? '#6B7280' : '#DC2626';
+                      badgeText = isPast ? 'Past' : 'Blocked';
+                      badgeBg = isPast ? '#E5E7EB' : '#FEE2E2';
+                      badgeColor = isPast ? '#4B5563' : '#991B1B';
+                      badgeBorder = isPast ? '1px solid #D1D5DB' : '1px solid #FECACA';
+                    } else if (!canStartDuration) {
+                      slotBg = '#FFFBEB';
+                      slotBorder = '1px solid #FDE68A';
+                      textColor = '#78350F';
+                      statusLabel = 'Duration Conflict';
+                      statusColor = '#B45309';
+                      badgeText = slotEndInfo.unavailabilityReason === 'Exceeds Closing (01:00 AM)' ? 'Past Close' : 'Conflict';
+                      badgeBg = '#FEF3C7';
+                      badgeColor = '#B45309';
+                      badgeBorder = '1px solid #FDE68A';
+                    } else if (slot.isPeak) {
+                      slotBg = '#FDF8EE'; // Champagne peak tint
+                      slotBorder = '1px solid #E9D9A7';
+                      textColor = '#191919';
+                      statusLabel = `₹${slot.rate} • Available`;
+                      statusColor = '#15803D';
+                      badgeText = 'Floodlights';
+                      badgeBg = '#FAF8F3';
+                      badgeColor = '#9D7916';
+                      badgeBorder = '1px solid #E9D9A7';
+                    } else {
+                      slotBg = '#FFFFFF';
+                      slotBorder = '1px solid #E8E2D5';
+                      textColor = '#191919';
+                      statusLabel = `₹${slot.rate} • Available`;
+                      statusColor = '#15803D';
+                      badgeText = null;
+                    }
+
+                    return (
+                      <div
+                        key={slot.id}
+                        onClick={() => isClickable && handleSlotSelect(slot)}
+                        style={{
+                          padding: '0.875rem 1rem',
+                          borderRadius: 'var(--radius-md)',
+                          border: slotBorder,
+                          backgroundColor: slotBg,
+                          cursor: isClickable ? 'pointer' : 'not-allowed',
+                          transition: 'all var(--transition-fast)',
+                          boxShadow: isInRange ? '0 4px 18px rgba(201, 162, 39, 0.35)' : 'var(--shadow-subtle)',
+                          position: 'relative',
+                          display: 'flex',
+                          flexDirection: 'column',
+                          justifyContent: 'space-between',
+                          gap: '0.55rem',
+                          minWidth: 0,
+                          overflow: 'hidden',
+                          boxSizing: 'border-box',
+                        }}
+                        onMouseEnter={(e) => {
+                          if (isClickable && !isInRange) {
+                            e.currentTarget.style.borderColor = '#C9A227';
+                            e.currentTarget.style.boxShadow = '0 4px 14px rgba(201, 162, 39, 0.2)';
+                          }
+                        }}
+                        onMouseLeave={(e) => {
+                          if (isClickable && !isInRange) {
+                            e.currentTarget.style.borderColor = slot.isPeak ? '#E9D9A7' : '#E8E2D5';
+                            e.currentTarget.style.boxShadow = 'var(--shadow-subtle)';
+                          }
+                        }}
+                      >
+                        {/* A. Dedicated Header Row (Start time & Badge) */}
+                        <div
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            gap: '0.4rem',
+                            minWidth: 0,
+                          }}
+                        >
+                          <span
+                            style={{
+                              fontFamily: 'var(--font-heading)',
+                              fontSize: '1.05rem',
+                              fontWeight: 700,
+                              color: textColor,
+                              whiteSpace: 'nowrap',
+                              minWidth: 0,
+                              letterSpacing: '-0.01em',
+                            }}
+                          >
+                            {slot.startTime}
+                          </span>
+
+                          {badgeText && (
+                            <span
+                              style={{
+                                fontSize: '0.65rem',
+                                fontWeight: 700,
+                                textTransform: 'uppercase',
+                                backgroundColor: badgeBg,
+                                color: badgeColor,
+                                border: badgeBorder,
+                                padding: '0.15rem 0.45rem',
+                                borderRadius: '4px',
+                                whiteSpace: 'nowrap',
+                                flexShrink: 0,
+                                letterSpacing: '0.03em',
+                              }}
+                            >
+                              {badgeText}
+                            </span>
+                          )}
+                        </div>
+
+                        {/* B. Separate Details Row (End time & Status) */}
+                        <div
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            fontSize: '0.785rem',
+                            gap: '0.4rem',
+                            minWidth: 0,
+                          }}
+                        >
+                          <span
+                            style={{
+                              fontWeight: isInRange ? 600 : 500,
+                              color: isInRange ? '#191919' : '#555555',
+                              whiteSpace: 'nowrap',
+                            }}
+                          >
+                            To {displayEndTime}
+                          </span>
+
+                          <span
+                            style={{
+                              fontWeight: 700,
+                              color: statusColor,
+                              whiteSpace: 'nowrap',
+                              fontSize: '0.75rem',
+                            }}
+                          >
+                            {statusLabel}
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
 
             {/* Selected Slot Summary Bar & Action */}

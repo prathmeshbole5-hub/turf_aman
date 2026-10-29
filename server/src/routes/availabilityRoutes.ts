@@ -17,13 +17,16 @@ router.get('/', (req, res) => {
       return;
     }
 
-    const ground = dbStore.grounds.get(groundId);
+    const ground = dbStore.getGround(groundId);
     if (!ground) {
-      res.status(404).json({ success: false, error: 'Ground not found.' });
+      res.status(404).json({ success: false, error: `Ground '${groundId}' not found.` });
       return;
     }
 
-    // 1. Generate 30-min intervals from 6 AM (360) to 1 AM next day (25*60 = 1500)
+    const canonicalGroundId = ground.id;
+    const stepMinutes = parseInt(req.query.step as string, 10) || 60;
+
+    // Generate intervals from 6 AM (360) to 1 AM next day (25*60 = 1500)
     const slots = [];
     const now = new Date();
     const todayStr = now.toISOString().split('T')[0];
@@ -31,17 +34,28 @@ router.get('/', (req, res) => {
     const currentMinutes = isToday ? now.getHours() * 60 + now.getMinutes() : -1;
 
     // Filter relevant confirmed/held bookings for this ground & date
-    const dayBookings = Array.from(dbStore.bookings.values()).filter(
-      (b) => b.groundId === groundId && b.date === date && b.bookingStatus !== 'CANCELLED'
-    );
+    const dayBookings = Array.from(dbStore.bookings.values()).filter((b) => {
+      const matchGround = b.groundId === canonicalGroundId || b.groundId === groundId;
+      if (!matchGround || b.date !== date) return false;
+      if (b.bookingStatus === 'CANCELLED') return false;
+      if (b.paymentStatus === 'FAILED') return false;
+
+      // Check temporary hold expiration for pending bookings
+      if (b.bookingStatus === 'PENDING' && b.holdExpiresAt) {
+        if (new Date(b.holdExpiresAt) <= now) {
+          return false;
+        }
+      }
+      return true;
+    });
 
     // Filter relevant maintenance blocks for this ground & date
     const dayBlocks = Array.from(dbStore.blockedPeriods.values()).filter(
-      (b) => b.groundId === groundId && b.date === date
+      (b) => (b.groundId === canonicalGroundId || b.groundId === groundId) && b.date === date
     );
 
-    for (let startM = 360; startM < 1500; startM += 30) {
-      const endM = startM + 30;
+    for (let startM = 360; startM < 1500; startM += stepMinutes) {
+      const endM = Math.min(1500, startM + stepMinutes);
       const startTimeStr = formatMinutesToTime(startM);
       const endTimeStr = formatMinutesToTime(endM);
       const isPeak = startM >= 960 || endM > 960; // 4 PM to 12 AM
@@ -89,6 +103,7 @@ router.get('/', (req, res) => {
         endTime: endTimeStr,
         status,
         isPeak,
+        rate: isPeak ? 1150 : 900,
         bookingReference,
         maintenanceReason,
       });
@@ -96,9 +111,10 @@ router.get('/', (req, res) => {
 
     res.json({
       success: true,
-      groundId,
+      groundId: canonicalGroundId,
       groundName: ground.name,
       date,
+      stepMinutes,
       totalSlots: slots.length,
       availableSlotsCount: slots.filter((s) => s.status === 'AVAILABLE').length,
       slots,

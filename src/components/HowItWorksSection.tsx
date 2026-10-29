@@ -8,10 +8,10 @@ import {
 } from 'lucide-react';
 
 interface HowItWorksProps {
-  onStartBooking: () => void;
+  onStartBooking?: () => void;
 }
 
-export const HowItWorksSection: React.FC<HowItWorksProps> = ({ onStartBooking }) => {
+export const HowItWorksSection: React.FC<HowItWorksProps> = () => {
   const steps = [
     {
       stepNumber: '01',
@@ -54,7 +54,6 @@ export const HowItWorksSection: React.FC<HowItWorksProps> = ({ onStartBooking })
             display: 'grid',
             gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 260px), 1fr))',
             gap: '1.5rem',
-            marginBottom: '3rem',
             position: 'relative',
           }}
         >
@@ -146,45 +145,6 @@ export const HowItWorksSection: React.FC<HowItWorksProps> = ({ onStartBooking })
               </div>
             </div>
           ))}
-        </div>
-
-        {/* Bottom CTA Banner */}
-        <div
-          style={{
-            backgroundColor: '#FAF8F3',
-            border: '1.5px solid #E8E2D5',
-            borderRadius: 'var(--radius-xl)',
-            padding: 'clamp(1.5rem, 4vw, 2.5rem) clamp(1.25rem, 3vw, 2rem)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            gap: '1.5rem',
-            flexWrap: 'wrap',
-            boxShadow: 'var(--shadow-card)',
-          }}
-        >
-          <div style={{ maxWidth: '620px' }}>
-            <h3 style={{ fontSize: 'clamp(1.2rem, 1rem + 1vw, 1.5rem)', color: '#191919', marginBottom: '0.35rem', fontWeight: 800 }}>
-              Ready to challenge your friends under the floodlights?
-            </h3>
-            <p style={{ color: '#666666', fontSize: '0.9375rem' }}>
-              Reserve your slot online in under 60 seconds with instant booking reference.
-            </p>
-          </div>
-
-          <button
-            onClick={onStartBooking}
-            className="btn btn-primary btn-lg btn-mobile-full"
-            style={{
-              backgroundColor: '#C9A227',
-              color: '#191919',
-              boxShadow: '0 6px 20px rgba(201, 162, 39, 0.35)',
-              justifyContent: 'center',
-            }}
-          >
-            <Sparkles size={18} />
-            <span>Book Your Game Now</span>
-          </button>
         </div>
       </div>
     </section>
