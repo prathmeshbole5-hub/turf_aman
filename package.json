@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build:server": "esbuild server/src/app.ts --bundle --platform=node --format=esm --packages=external --outfile=api/index.js",
+    "build": "tsc -b && vite build && npm run build:server",
     "lint": "oxlint",
     "preview": "vite preview",
     "server": "tsx server/src/index.ts",

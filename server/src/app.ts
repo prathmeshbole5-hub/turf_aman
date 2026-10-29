@@ -24,8 +24,23 @@ app.use(
 );
 app.use(express.json());
 
+// Serverless Rewrite Path Normalizer (recovers original path on Vercel while preserving query string)
+app.use((req: Request, _res: Response, next: NextFunction) => {
+  const queryIndex = req.url.indexOf('?');
+  const queryString = queryIndex !== -1 ? req.url.slice(queryIndex) : '';
+
+  const matchedPath = (req.headers['x-matched-path'] as string) || '';
+  if (matchedPath && (matchedPath.startsWith('/api') || matchedPath.includes('/api/'))) {
+    req.url = `${matchedPath}${queryString}`;
+  } else if (req.query && req.query.path) {
+    const subpath = Array.isArray(req.query.path) ? req.query.path.join('/') : req.query.path;
+    req.url = `/${subpath}${queryString}`;
+  }
+  next();
+});
+
 // Health Check Endpoint
-app.get('/api/health', (_req: Request, res: Response) => {
+const handleHealth = (_req: Request, res: Response) => {
   res.json({
     status: 'ONLINE',
     platform: 'TURFZONE Multi-Sport API',
@@ -33,18 +48,29 @@ app.get('/api/health', (_req: Request, res: Response) => {
     timestamp: new Date().toISOString(),
     environment: config.nodeEnv,
   });
-});
+};
+app.get('/api/health', handleHealth);
+app.get('/health', handleHealth);
 
-// API Routes
+// API Routes (Mounted on both /api/* and root /* for complete serverless compatibility)
 app.use('/api/auth', authRoutes);
+app.use('/auth', authRoutes);
 app.use('/api/sports', sportsRoutes);
+app.use('/sports', sportsRoutes);
 app.use('/api/grounds', groundsRoutes);
+app.use('/grounds', groundsRoutes);
 app.use('/api/availability', availabilityRoutes);
+app.use('/availability', availabilityRoutes);
 app.use('/api/pricing', pricingRoutes);
+app.use('/pricing', pricingRoutes);
 app.use('/api/bookings', bookingsRoutes);
+app.use('/bookings', bookingsRoutes);
 app.use('/api/payments', paymentRoutes);
+app.use('/payments', paymentRoutes);
 app.use('/api/admin', adminRoutes);
+app.use('/admin', adminRoutes);
 app.use('/api/settings', settingsRoutes);
+app.use('/settings', settingsRoutes);
 
 // Centralized 404 Handler
 app.use((_req: Request, res: Response) => {

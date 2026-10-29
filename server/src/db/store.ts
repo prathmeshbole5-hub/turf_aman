@@ -125,7 +125,13 @@ class DatabaseStore {
 
   // Ground Locks for Concurrency Control
   private groundMutexes: Map<string, Promise<void>> = new Map();
-  private dbFilePath: string = path.resolve(process.cwd(), 'server', 'data', 'turf_database.json');
+
+  private getDbFilePath(): string {
+    if (process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME) {
+      return path.resolve('/tmp', 'turf_database.json');
+    }
+    return path.resolve(process.cwd(), 'server', 'data', 'turf_database.json');
+  }
 
   constructor() {
     this.seedInitialData();
@@ -201,7 +207,8 @@ class DatabaseStore {
   // Persistence to prevent accidental in-memory permanent data loss
   public saveToDisk(): void {
     try {
-      const dataDir = path.dirname(this.dbFilePath);
+      const filePath = this.getDbFilePath();
+      const dataDir = path.dirname(filePath);
       if (!fs.existsSync(dataDir)) {
         fs.mkdirSync(dataDir, { recursive: true });
       }
@@ -217,7 +224,7 @@ class DatabaseStore {
         savedAt: new Date().toISOString(),
       };
 
-      fs.writeFileSync(this.dbFilePath, JSON.stringify(dump, null, 2), 'utf-8');
+      fs.writeFileSync(filePath, JSON.stringify(dump, null, 2), 'utf-8');
     } catch (err) {
       console.error('Failed to write database persistence file:', err);
     }
@@ -225,8 +232,16 @@ class DatabaseStore {
 
   public loadFromDisk(): void {
     try {
-      if (!fs.existsSync(this.dbFilePath)) return;
-      const raw = fs.readFileSync(this.dbFilePath, 'utf-8');
+      const primaryPath = this.getDbFilePath();
+      const localDataPath = path.resolve(process.cwd(), 'server', 'data', 'turf_database.json');
+      const targetPath = fs.existsSync(primaryPath)
+        ? primaryPath
+        : fs.existsSync(localDataPath)
+        ? localDataPath
+        : null;
+      if (!targetPath) return;
+
+      const raw = fs.readFileSync(targetPath, 'utf-8');
       const data = JSON.parse(raw);
 
       if (Array.isArray(data.bookings)) {
